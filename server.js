@@ -1,78 +1,85 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
 });
 
-const lobbies = {};
+// In-memory room store
+const rooms = {};
 
 app.get('/', (req, res) => {
-  res.json({ status: "Server running", activeLobbies: Object.keys(lobbies).length });
-});
-
-app.post('/api/lobbies/create', (req, res) => {
-  const { hostName } = req.body;
-  const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-  lobbies[roomCode] = { code: roomCode, host: hostName || "Host", players: [] };
-  res.json({ success: true, roomCode });
+    res.send('Gamer Field Backend is Live!');
 });
 
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+    console.log(`User connected: ${socket.id}`);
 
-  socket.on('join_room', ({ roomCode, username }) => {
-    if (!lobbies[roomCode]) {
-      socket.emit('error_msg', 'Lobby not found!');
-      return;
-    }
-    socket.join(roomCode);
-    socket.data = { roomCode, username: username || `Player_${socket.id.substring(0, 4)}` };
-    const player = { id: socket.id, username: socket.data.username, isReady: false };
-    lobbies[roomCode].players.push(player);
-    io.to(roomCode).emit('lobby_updated', lobbies[roomCode]);
-  });
+    // CREATE ROOM
+    socket.on('create_room', (data) => {
+        const username = data.username || "Player";
+        const roomCode = data.roomCode ? data.roomCode.toUpperCase() : Math.random().toString(36).substring(2, 8).toUpperCase();
 
-  socket.on('toggle_ready', () => {
-    const { roomCode } = socket.data || {};
-    if (!roomCode || !lobbies[roomCode]) return;
-    const player = lobbies[roomCode].players.find(p => p.id === socket.id);
-    if (player) {
-      player.isReady = !player.isReady;
-      io.to(roomCode).emit('lobby_updated', lobbies[roomCode]);
-    }
-  });
+        rooms[roomCode] = {
+            code: roomCode,
+            host: socket.id,
+            players: [{ id: socket.id, username: username, ready: false }]
+        };
 
-  socket.on('send_message', ({ message }) => {
-    const { roomCode, username } = socket.data || {};
-    if (!roomCode) return;
-    io.to(roomCode).emit('chat_received', {
-      sender: username,
-      message,
-      timestamp: new Date().toLocaleTimeString()
+        socket.join(roomCode);
+        console.log(`Room created: ${roomCode} by ${username}`);
+
+        socket.emit('room_created', { roomCode: roomCode, players: rooms[roomCode].players });
+        io.to(roomCode).emit('lobby_updated', rooms[roomCode]);
     });
-  });
 
-  socket.on('disconnect', () => {
-    const { roomCode } = socket.data || {};
-    if (roomCode && lobbies[roomCode]) {
-      lobbies[roomCode].players = lobbies[roomCode].players.filter(p => p.id !== socket.id);
-      if (lobbies[roomCode].players.length === 0) {
-        delete lobbies[roomCode];
-      } else {
-        io.to(roomCode).emit('lobby_updated', lobbies[roomCode]);
-      }
-    }
-    console.log(`User disconnected: ${socket.id}`);
-  });
+    // JOIN ROOM
+    socket.on('join_room', (data) => {
+        const username = data.username || "Player";
+        const roomCode = data.roomCode ? data.roomCode.toUpperCase().trim() : "";
+
+        console.log(`Attempting to join room: ${roomCode} by ${username}`);
+
+        if (rooms[roomCode]) {
+            socket.join(roomCode);
+            
+            const existingPlayer = rooms[roomCode].players.find(p => p.id === socket.id);
+            if (!existingPlayer) {
+                rooms[roomCode].players.push({ id: socket.id, username: username, ready: false });
+            }
+
+            console.log(`${username} joined room ${roomCode}`);
+            io.to(roomCode).emit('lobby_updated', rooms[roomCode]);
+        } else {
+            console.log(`Room ${roomCode} not found in memory`);
+            socket.emit('error_msg', 'Lobby not found. Please double-check the room code!');
+        }
+    });
+
+    // DISCONNECT
+    socket.on('disconnect', () => {
+        console.log(`User disconnected: ${socket.id}`);
+        for (const roomCode in rooms) {
+            const room = rooms[roomCode];
+            room.players = room.players.filter(p => p.id !== socket.id);
+            if (room.players.length === 0) {
+                delete rooms[roomCode];
+                console.log(`Room ${roomCode} deleted (empty)`);
+            } else {
+                io.to(roomCode).emit('lobby_updated', room);
+            }
+        }
+    });
 });
 
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+});
